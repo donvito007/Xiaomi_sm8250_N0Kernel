@@ -541,6 +541,7 @@ rcu_preempt_deferred_qs_irqrestore(struct task_struct *t, unsigned long flags)
 		/* Unboost if we were boosted. */
 		if (IS_ENABLED(CONFIG_RCU_BOOST) && drop_boost_mutex)
 			rt_mutex_futex_unlock(&rnp->boost_mtx);
+
 	} else {
 		local_irq_restore(flags);
 	}
@@ -1468,9 +1469,6 @@ static void rcu_cleanup_after_idle(void)
  * comma-separated list of CPUs and/or CPU ranges.  If an invalid list is
  * given, a warning is emitted and all CPUs are offloaded.
  */
-
-static bool rcu_nocb_is_setup;
-
 static int __init rcu_nocb_setup(char *str)
 {
 	alloc_bootmem_cpumask_var(&rcu_nocb_mask);
@@ -1481,7 +1479,6 @@ static int __init rcu_nocb_setup(char *str)
 			pr_warn("rcu_nocbs= bad CPU range, all CPUs set\n");
 			cpumask_setall(rcu_nocb_mask);
 		}
-	rcu_nocb_is_setup = true;
 	return 1;
 }
 __setup("rcu_nocbs=", rcu_nocb_setup);
@@ -1816,9 +1813,8 @@ static bool rcu_nocb_try_bypass(struct rcu_data *rdp, struct rcu_head *rhp,
 	if ((ncbs && j != READ_ONCE(rdp->nocb_bypass_first)) ||
 	    ncbs >= qhimark) {
 		rcu_nocb_lock(rdp);
-		*was_alldone = !rcu_segcblist_pend_cbs(&rdp->cblist);
-
 		if (!rcu_nocb_flush_bypass(rdp, rhp, j)) {
+			*was_alldone = !rcu_segcblist_pend_cbs(&rdp->cblist);
 			if (*was_alldone)
 				trace_rcu_nocb_wake(rcu_state.name, rdp->cpu,
 						    TPS("FirstQ"));
@@ -1831,12 +1827,7 @@ static bool rcu_nocb_try_bypass(struct rcu_data *rdp, struct rcu_head *rhp,
 			rcu_advance_cbs_nowake(rdp->mynode, rdp);
 			rdp->nocb_gp_adv_time = j;
 		}
-
-		// The flush succeeded and we moved CBs into the regular list.
-		// Don't wait for the wake up timer as it may be too far ahead.
-		// Wake up the GP thread now instead, if the cblist was empty.
-		__call_rcu_nocb_wake(rdp, true, flags);
-
+		rcu_nocb_unlock_irqrestore(rdp, flags);
 		return true; // Callback already enqueued.
 	}
 
@@ -2210,21 +2201,11 @@ void __init rcu_init_nohz(void)
 {
 	int cpu;
 	bool need_rcu_nocb_mask = false;
-	bool offload_all = false;
 	struct rcu_data *rdp;
 
-#if defined(CONFIG_RCU_NOCB_CPU_DEFAULT_ALL)
-	if (!rcu_nocb_is_setup) {
-		need_rcu_nocb_mask = true;
-		offload_all = true;
-	}
-#endif /* #if defined(CONFIG_RCU_NOCB_CPU_DEFAULT_ALL) */
-
 #if defined(CONFIG_NO_HZ_FULL)
-	if (tick_nohz_full_running && cpumask_weight(tick_nohz_full_mask)) {
+	if (tick_nohz_full_running && cpumask_weight(tick_nohz_full_mask))
 		need_rcu_nocb_mask = true;
-		offload_all = false; /* NO_HZ_FULL has its own mask. */
-	}
 #endif /* #if defined(CONFIG_NO_HZ_FULL) */
 
 	if (!cpumask_available(rcu_nocb_mask) && need_rcu_nocb_mask) {
@@ -2240,9 +2221,6 @@ void __init rcu_init_nohz(void)
 	if (tick_nohz_full_running)
 		cpumask_or(rcu_nocb_mask, rcu_nocb_mask, tick_nohz_full_mask);
 #endif /* #if defined(CONFIG_NO_HZ_FULL) */
-
-	if (offload_all)
-		cpumask_setall(rcu_nocb_mask);
 
 	if (!cpumask_subset(rcu_nocb_mask, cpu_possible_mask)) {
 		pr_info("\tNote: kernel parameter 'rcu_nocbs=', 'nohz_full', or 'isolcpus=' contains nonexistent CPUs.\n");

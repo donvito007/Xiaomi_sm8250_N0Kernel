@@ -49,7 +49,6 @@
 #include <linux/ftrace.h>
 #include <linux/tick.h>
 #include <linux/sysrq.h>
-#include <linux/kprobes.h>
 #include <linux/gfp.h>
 #include <linux/oom.h>
 #include <linux/smpboot.h>
